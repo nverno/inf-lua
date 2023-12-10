@@ -48,6 +48,12 @@
   :type 'boolean
   :group 'inf-lua)
 
+(defcustom inf-lua-completion-enabled t
+  "Enable/disable inferior lua completion at point."
+  :type 'boolean
+  :group 'inf-lua)
+
+(defvar inf-lua-prompt-debugger-regexp "debugger.lua>")
 
 (defvar inf-lua-repl-compilation-regexp-alist
   '(;; debugger.lua
@@ -57,11 +63,13 @@
     ("^\\(?:[\t ]*\\|.*>[\t ]+\\)\\(?:[^\n\t ]+:[0-9]+:[\t ]*\\)*\\(?:\\([^\n\t ]+\\):\\([0-9]+\\):\\)" 1 2)))
 
 (defun inf-lua-calculate-command (&optional prompt default)
-  (unless default
-    (setq default (concat lua-ts-inferior-program " "
-                          (mapconcat 'identity lua-ts-inferior-options " "))))
-  (if prompt (read-shell-command "Run Lua: " default)
-    default))
+  (setq default (or default (concat
+                             lua-ts-inferior-program " "
+                             (mapconcat 'identity lua-ts-inferior-options " "))))
+  (concat (if prompt (read-shell-command "Run Lua: " default) default)
+          (when inf-lua-completion-enabled
+            (format " -e \"%s\"" (replace-regexp-in-string
+                                  "\\\\" "\\\\\\\\" inf-lua--completion-code)))))
 
 (defun inf-lua-buffer ()
   "Return inferior Lua buffer for current buffer."
@@ -158,22 +166,28 @@ Returns the name of the created comint buffer."
 ;; -------------------------------------------------------------------
 ;;; Completion
 
-(defun inf-lua-completion-setup (process)
-  (let ((code "
-function __repl_complete(line, initial_scope)
+(defvar inf-lua--completion-code "
+function __REPL_complete(line, initial_scope)
   local base, sep, rest = string.match(line, '^(.*)([.:])(.*)')
   if not base then
     rest = line
   end
   local prefix = string.match(rest, '^[%a_][%a%d_]*')
-  if prefix and prefix ~= rest then return end
+  if prefix and prefix ~= rest then return print() end
   local scope = initial_scope or _G
+  local meth = sep == ':'
   if base then
-    local f = load('return ' .. base, nil, nil, scope)
-    if not f then return end
-    local ok
-    ok, scope = pcall(f)
-    if not ok then return end
+    if meth and type(scope[base]) == 'string' then
+      scope = string
+    elseif meth and type(scope[base]) == 'thread' then
+      scope = coroutine
+    else
+      local f = load('return ' .. base, nil, nil, scope)
+      if not f then return print() end
+      local ok
+      ok, scope = pcall(f)
+      if not ok then return print() end
+    end
   else
     base = ''
     sep = ''
@@ -197,20 +211,28 @@ function __repl_complete(line, initial_scope)
   end
   table.sort(items)
   if #items == 1 then
-    io.write(base .. sep .. items[1], '\\n')
+    return print(base .. sep .. items[1])
   elseif #items > 1 then
     for k, v in pairs(items) do
-      io.write(base .. sep .. v, '\\n')
+      items[k] = base .. sep .. v
     end
+    return print(table.concat(items, '\\n'))
   end
-end"))
-    (comint-send-string process code)))
+end")
+
+(defun inf-lua-setup-completion ()
+  "Setup completion in Lua repl."
+  (interactive)
+  (if-let ((process (inf-lua-process)))
+      (progn (comint-send-string process inf-lua--completion-code)
+             (setq inf-lua-completion-enabled t))
+    (user-error "Start a lua process first")))
 
 (defun inf-lua--get-completions-from-process (process input)
   "Get completions for prefix INPUT from PROCESS."
   (with-current-buffer (process-buffer process)
     (let ((redirect-buffer (get-buffer-create "* Lua completions redirect*"))
-          (input-to-send (format "__repl_complete(\"%s\")" input)))
+          (input-to-send (format "__REPL_complete(\"%s\")" input)))
       (with-current-buffer redirect-buffer
         (erase-buffer)
         (with-current-buffer (process-buffer process)
@@ -224,15 +246,13 @@ end"))
           (line-beginning-position) (point-min))
          "[ \f\t\n\r\v()]+" t)))))
 
-(defvar inf-lua-prompt-debugger-regexp "debugger.lua>")
-
 (defvar-local inf-lua--capf-cache nil)
 
-(defun inf-lua-completion-at-point-function (&optional process)
+(defun inf-lua--completion-at-point (&optional process)
   (setq process (or process (get-buffer-process (current-buffer))))
   (let* ((repl-buffer-p (derived-mode-p 'inf-lua-mode))
          (line-start (if repl-buffer-p
-                         (cdr comint-last-prompt)
+                         (cdr (bound-and-true-p comint-last-prompt))
                        (line-beginning-position)))
          (start (if (< (point) line-start)
                     (point)
@@ -277,8 +297,10 @@ end"))
     (list start end (cddr inf-lua--capf-cache))))
 
 (defun inf-lua-completion-at-point ()
-  (when (comint-after-pmark-p)
-    (inf-lua-completion-at-point-function)))
+  (when (and inf-lua-completion-enabled
+             (derived-mode-p 'inf-lua-mode)
+             (comint-after-pmark-p))
+    (inf-lua--completion-at-point (get-buffer-process (current-buffer)))))
 
 ;; -------------------------------------------------------------------
 ;;; Font-lock
@@ -454,8 +476,6 @@ goes wrong and syntax highlighting in the shell gets messed up."
 
   (when inf-lua-font-lock-enable
     (inf-lua-font-lock-turn-on))
-
-  (inf-lua-completion-setup (get-buffer-process (current-buffer)))
   (add-hook 'completion-at-point-functions #'inf-lua-completion-at-point nil t))
 
 (provide 'inf-lua)
