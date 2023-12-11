@@ -28,6 +28,18 @@
 ;;
 ;; Inf-lua provides a REPL buffer for interacting with a Lua process.
 ;;
+;; Features:
+;;  - completion-at-point: For globals, methods, functions, and
+;;    filenames in strings.
+;;  - font-locking using `lua-ts-mode' for input
+;;
+;; TODO:
+;;  - setup debugger tracking
+;;    possible to switch into `gud-lua' somehow?
+;;    or something like `python-pdbtrack-setup-tracking'
+;;  - switch to inf-lua during compilation when execution enters interactive
+;;    mode - `inf-ruby-switch-from-compilation'
+;;
 ;;; Code:
 
 (require 'comint)
@@ -66,10 +78,11 @@
   (setq default (or default (concat
                              lua-ts-inferior-program " "
                              (mapconcat 'identity lua-ts-inferior-options " "))))
-  (concat (if prompt (read-shell-command "Run Lua: " default) default)
-          (when inf-lua-completion-enabled
-            (format " -e \"%s\"" (replace-regexp-in-string
-                                  "\\\\" "\\\\\\\\" inf-lua--completion-code)))))
+  (if prompt (read-shell-command "Run Lua: " default) default))
+;; Dont use '-e' in case repl doesn't support it, eg. rep.lua
+;; (when inf-lua-completion-enabled
+;;   (format " -e \"%s\"" (replace-regexp-in-string
+;;                         "\\\\" "\\\\\\\\" inf-lua--completion-code)))
 
 (defun inf-lua-buffer ()
   "Return inferior Lua buffer for current buffer."
@@ -118,7 +131,9 @@ Returns the name of the created comint buffer."
           (set-process-sentinel
            (get-buffer-process buffer) #'lua-ts-inferior--write-history))
         (with-current-buffer buffer
-          (inf-lua-mode))))
+          (inf-lua-mode)
+          (when inf-lua-completion-enabled
+            (inf-lua-setup-completion)))))
     (when show
       (pop-to-buffer proc-buff-name))
     proc-buff-name))
@@ -232,7 +247,9 @@ end")
   "Get completions for prefix INPUT from PROCESS."
   (with-current-buffer (process-buffer process)
     (let ((redirect-buffer (get-buffer-create "* Lua completions redirect*"))
-          (input-to-send (format "__REPL_complete(\"%s\")" input)))
+          (input-to-send
+           (format "__REPL_complete(\"%s\")"
+                   (replace-regexp-in-string "\\\"" "\\\\\"" input))))
       (with-current-buffer redirect-buffer
         (erase-buffer)
         (with-current-buffer (process-buffer process)
@@ -248,23 +265,31 @@ end")
 
 (defvar-local inf-lua--capf-cache nil)
 
+(defun inf-lua--beginning-of-sexp (lim)
+  (while (and (> (point) lim)
+              (or (not (zerop (skip-syntax-backward "w_")))
+                  (pcase (char-before)
+                    ((or ?. ?:) (forward-char -1) t)
+                    ;; XXX: include function calls? eg. "fn().prefix"
+                    ((or ?\) ?\] ) (backward-sexp) t)
+                    (_ nil)))))
+  (point))
+
 (defun inf-lua--completion-at-point (&optional process)
   (setq process (or process (get-buffer-process (current-buffer))))
   (let* ((repl-buffer-p (derived-mode-p 'inf-lua-mode))
          (line-start (if repl-buffer-p
                          (cdr (bound-and-true-p comint-last-prompt))
                        (line-beginning-position)))
+         (in-string-p (nth 3 (syntax-ppss)))
+         (end (point))
          (start (if (< (point) line-start)
                     (point)
                   (save-excursion
-                    (while (and (> (point) line-start)
-                                (or (not (zerop (skip-syntax-backward "w_")))
-                                    (pcase (char-before)
-                                      ((or ?. ?:) (forward-char -1) t)
-                                      ((or ?\) ?\] ) (backward-sexp) t)
-                                      (_ nil)))))
-                    (point))))
-         (end (point))
+                    (if (not in-string-p)
+                        (inf-lua--beginning-of-sexp line-start)
+                      (search-backward (string in-string-p) line-start t)
+                      (1+ (point))))))
          (proc-buff (process-buffer process))
          (prompt)
          (prompt-boundaries (with-current-buffer proc-buff
@@ -282,6 +307,7 @@ end")
                             (string-match-p
                              inf-lua-prompt-debugger-regexp prompt)))
                    #'ignore)
+                  (in-string-p #'ignore)
                   (t #'inf-lua--get-completions-from-process))))
          (prev-prompt (car inf-lua--capf-cache))
          (re (or (cadr inf-lua--capf-cache) regexp-unmatchable))
@@ -294,9 +320,13 @@ end")
                    regexp-unmatchable
                  (concat "\\`" (regexp-quote prefix) "\\(?:\\sw\\|\\s_\\)*\\'"))
               ,@(funcall completion-fn process prefix))))
-    (list start end (cddr inf-lua--capf-cache))))
+    (list start end
+          (if in-string-p
+              #'completion-file-name-table
+            (cddr inf-lua--capf-cache)))))
 
 (defun inf-lua-completion-at-point ()
+  "Completion at point function for Lua repl."
   (when (and inf-lua-completion-enabled
              (derived-mode-p 'inf-lua-mode)
              (comint-after-pmark-p))
