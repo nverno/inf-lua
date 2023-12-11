@@ -29,11 +29,13 @@
 ;; Inf-lua provides a REPL buffer for interacting with a Lua process.
 ;;
 ;; Features:
-;;  - completion-at-point: For globals, methods, functions, and
+;;  - completion-at-point: For globals, methods, functions, table keys, and
 ;;    filenames in strings.
 ;;  - font-locking using `lua-ts-mode' for input
 ;;
 ;; TODO:
+;;  - Add filename, line number info to regions loaded into repl 
+;;    (`lua-send-region') so tracebacks work
 ;;  - setup debugger tracking
 ;;    possible to switch into `gud-lua' somehow?
 ;;    or something like `python-pdbtrack-setup-tracking'
@@ -243,13 +245,14 @@ end")
              (setq inf-lua-completion-enabled t))
     (user-error "Start a lua process first")))
 
-(defun inf-lua--get-completions-from-process (process input)
-  "Get completions for prefix INPUT from PROCESS."
+(defun inf-lua--get-completions-from-process (process input &optional scope)
+  "Get completions for prefix INPUT in SCOPE from PROCESS."
   (with-current-buffer (process-buffer process)
     (let ((redirect-buffer (get-buffer-create "* Lua completions redirect*"))
           (input-to-send
-           (format "__REPL_complete(\"%s\")"
-                   (replace-regexp-in-string "\\\"" "\\\\\"" input))))
+           (format "__REPL_complete(\"%s\", %s)"
+                   (replace-regexp-in-string "\\\"" "\\\\\"" input)
+                   scope)))
       (with-current-buffer redirect-buffer
         (erase-buffer)
         (with-current-buffer (process-buffer process)
@@ -265,14 +268,15 @@ end")
 
 (defvar-local inf-lua--capf-cache nil)
 
-(defun inf-lua--beginning-of-sexp (lim)
+(defun inf-lua--beginning-of-sexp (lim &optional include-scope)
   (while (and (> (point) lim)
               (or (not (zerop (skip-syntax-backward "w_")))
-                  (pcase (char-before)
-                    ((or ?. ?:) (forward-char -1) t)
-                    ;; XXX: include function calls? eg. "fn().prefix"
-                    ((or ?\) ?\] ) (backward-sexp) t)
-                    (_ nil)))))
+                  (and include-scope
+                       (pcase (char-before)
+                         ((or ?. ?:) (forward-char -1) t)
+                         ;; XXX: include function calls? eg. "fn().prefix"
+                         ((or ?\) ?\] ) (backward-sexp) t)
+                         (_ nil))))))
   (point))
 
 (defun inf-lua--completion-at-point (&optional process)
@@ -282,14 +286,30 @@ end")
                          (cdr (bound-and-true-p comint-last-prompt))
                        (line-beginning-position)))
          (in-string-p (nth 3 (syntax-ppss)))
+         (scope)
          (end (point))
          (start (if (< (point) line-start)
                     (point)
                   (save-excursion
                     (if (not in-string-p)
-                        (inf-lua--beginning-of-sexp line-start)
+                        (prog1 (inf-lua--beginning-of-sexp line-start)
+                          (when (memq (char-before) '(?. ?:))
+                            (forward-char -1)
+                            (setq scope (buffer-substring-no-properties
+                                         (save-excursion
+                                           (inf-lua--beginning-of-sexp
+                                            line-start 'scope))
+                                         (point)))))
                       (search-backward (string in-string-p) line-start t)
-                      (1+ (point))))))
+                      (prog1 (1+ (point))
+                        ;; table key, eg _G["str
+                        (when (eq ?\[ (char-before))
+                          (forward-char -1)
+                          (let ((scope-end (point)))
+                            (setq scope (buffer-substring-no-properties
+                                         (inf-lua--beginning-of-sexp line-start)
+                                         scope-end)))))))))
+         (filename-p (and in-string-p (not scope)))
          (proc-buff (process-buffer process))
          (prompt)
          (prompt-boundaries (with-current-buffer proc-buff
@@ -307,23 +327,25 @@ end")
                             (string-match-p
                              inf-lua-prompt-debugger-regexp prompt)))
                    #'ignore)
-                  (in-string-p #'ignore)
+                  (filename-p #'ignore)
                   (t #'inf-lua--get-completions-from-process))))
          (prev-prompt (car inf-lua--capf-cache))
          (re (or (cadr inf-lua--capf-cache) regexp-unmatchable))
-         (prefix (buffer-substring-no-properties start end)))
-    (unless (and (equal prev-prompt (car prompt-boundaries))
+         (prefix (and (>= end start)
+                      (buffer-substring-no-properties start end))))
+    (unless (and prefix
+                 (equal prev-prompt (car prompt-boundaries))
                  (string-match re prefix))
       (setq inf-lua--capf-cache
             `(,(car prompt-boundaries)
               ,(if (string-empty-p prefix)
                    regexp-unmatchable
                  (concat "\\`" (regexp-quote prefix) "\\(?:\\sw\\|\\s_\\)*\\'"))
-              ,@(funcall completion-fn process prefix))))
-    (list start end
-          (if in-string-p
-              #'completion-file-name-table
-            (cddr inf-lua--capf-cache)))))
+              ,@(funcall completion-fn process prefix scope))))
+    (when (>= end start)
+      (list start end (if filename-p
+                          #'completion-file-name-table
+                        (cddr inf-lua--capf-cache))))))
 
 (defun inf-lua-completion-at-point ()
   "Completion at point function for Lua repl."
