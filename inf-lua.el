@@ -186,12 +186,26 @@ Returns the name of the created comint buffer."
 (defvar inf-lua--completion-code "
 function __REPL_complete(line, initial_scope)
   local base, sep, rest = string.match(line, '^(.*)([.:])(.*)')
-  if not base then
-    rest = line
-  end
+  if not base then rest = line end
   local prefix = string.match(rest, '^[%a_][%a%d_]*')
   if prefix and prefix ~= rest then return print() end
-  local scope = initial_scope or _G
+  local function get_scope(scope)
+    if not scope or scope == '' then return _G end
+    local f = load('return ' .. scope)
+    if f then
+      local ok
+      ok, scope = pcall(f)
+      if ok then
+        local typ = type(scope)
+        if typ == 'string' then return string end
+        if typ == 'thread' then return coroutine end
+        return scope
+      end
+    end
+    return {}
+  end
+  local scope = get_scope(initial_scope) --- @type table
+  if not scope then return print() end
   local meth = sep == ':'
   if base then
     if meth and type(scope[base]) == 'string' then
@@ -228,11 +242,8 @@ function __REPL_complete(line, initial_scope)
   end
   table.sort(items)
   if #items == 1 then
-    return print(base .. sep .. items[1])
+    return print(items[1])
   elseif #items > 1 then
-    for k, v in pairs(items) do
-      items[k] = base .. sep .. v
-    end
     return print(table.concat(items, '\\n'))
   end
 end")
@@ -247,24 +258,25 @@ end")
 
 (defun inf-lua--get-completions-from-process (process input &optional scope)
   "Get completions for prefix INPUT in SCOPE from PROCESS."
-  (with-current-buffer (process-buffer process)
-    (let ((redirect-buffer (get-buffer-create "* Lua completions redirect*"))
-          (input-to-send
-           (format "__REPL_complete(\"%s\", %s)"
-                   (replace-regexp-in-string "\\\"" "\\\\\"" input)
-                   scope)))
-      (with-current-buffer redirect-buffer
-        (erase-buffer)
-        (with-current-buffer (process-buffer process)
-          (comint-redirect-send-command
-           input-to-send redirect-buffer nil t)
-          (while (and (null comint-redirect-completed)
-                      (accept-process-output process 1)))
-          (comint-redirect-cleanup))
-        (split-string
-         (buffer-substring-no-properties
-          (line-beginning-position) (point-min))
-         "[ \f\t\n\r\v()]+" t)))))
+  (cl-flet ((escape-string (s) (replace-regexp-in-string "\\\"" "\\\\\"" s)))
+    (with-current-buffer (process-buffer process)
+      (let ((redirect-buffer (get-buffer-create "* Lua completions redirect*"))
+            (input-to-send
+             (format "__REPL_complete(\"%s\", %s)"
+                     (escape-string input)
+                     (and scope (concat "\"" (escape-string scope) "\"")))))
+        (with-current-buffer redirect-buffer
+          (erase-buffer)
+          (with-current-buffer (process-buffer process)
+            (comint-redirect-send-command
+             input-to-send redirect-buffer nil t)
+            (while (and (null comint-redirect-completed)
+                        (accept-process-output process 1)))
+            (comint-redirect-cleanup))
+          (split-string
+           (buffer-substring-no-properties
+            (line-beginning-position) (point-min))
+           "[ \f\t\n\r\v()]+" t))))))
 
 (defvar-local inf-lua--capf-cache nil)
 
@@ -287,6 +299,7 @@ end")
                        (line-beginning-position)))
          (in-string-p (nth 3 (syntax-ppss)))
          (scope)
+         (sep)
          (end (point))
          (start (if (< (point) line-start)
                     (point)
@@ -295,7 +308,8 @@ end")
                         (prog1 (inf-lua--beginning-of-sexp line-start)
                           (when (memq (char-before) '(?. ?:))
                             (forward-char -1)
-                            (setq scope (buffer-substring-no-properties
+                            (setq sep (char-to-string (char-after))
+                                  scope (buffer-substring-no-properties
                                          (save-excursion
                                            (inf-lua--beginning-of-sexp
                                             line-start 'scope))
@@ -332,15 +346,17 @@ end")
          (prev-prompt (car inf-lua--capf-cache))
          (re (or (cadr inf-lua--capf-cache) regexp-unmatchable))
          (prefix (and (>= end start)
-                      (buffer-substring-no-properties start end))))
-    (unless (and prefix
+                      (buffer-substring-no-properties start end)))
+         (cache-prefix (concat scope sep prefix)))
+    (unless (and cache-prefix
                  (equal prev-prompt (car prompt-boundaries))
-                 (string-match re prefix))
+                 (string-match re cache-prefix))
       (setq inf-lua--capf-cache
             `(,(car prompt-boundaries)
-              ,(if (string-empty-p prefix)
+              ,(if (string-empty-p cache-prefix)
                    regexp-unmatchable
-                 (concat "\\`" (regexp-quote prefix) "\\(?:\\sw\\|\\s_\\)*\\'"))
+                 (concat
+                  "\\`" (regexp-quote cache-prefix) "\\(?:\\sw\\|\\s_\\)*\\'"))
               ,@(funcall completion-fn process prefix scope))))
     (when (>= end start)
       (list start end (if filename-p

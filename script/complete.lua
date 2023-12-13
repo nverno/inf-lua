@@ -1,14 +1,27 @@
 -- TODO: Add keywords with there is no base / scope
--- local dbg = require 'debugger'
 
 function __REPL_complete(line, initial_scope)
   local base, sep, rest = string.match(line, '^(.*)([.:])(.*)')
-  if not base then
-    rest = line
-  end
+  if not base then rest = line end
   local prefix = string.match(rest, '^[%a_][%a%d_]*')
   if prefix and prefix ~= rest then return print() end
-  local scope = initial_scope or _G
+  local function get_scope(scope)
+    if not scope or scope == '' then return _G end
+    local f = load('return ' .. scope)
+    if f then
+      local ok
+      ok, scope = pcall(f)
+      if ok then
+        local typ = type(scope)
+        if typ == 'string' then return string end
+        if typ == 'thread' then return coroutine end
+        return scope
+      end
+    end
+    return {}
+  end
+  local scope = get_scope(initial_scope) --- @type table
+  if not scope then return print() end
   local meth = sep == ':'
   if base then
     if meth and type(scope[base]) == 'string' then
@@ -45,11 +58,8 @@ function __REPL_complete(line, initial_scope)
   end
   table.sort(items)
   if #items == 1 then
-    return print(base .. sep .. items[1])
+    return print(items[1])
   elseif #items > 1 then
-    for k, v in pairs(items) do
-      items[k] = base .. sep .. v
-    end
     return print(table.concat(items, '\n'))
   end
 end
