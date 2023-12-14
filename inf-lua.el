@@ -31,7 +31,8 @@
 ;; Features:
 ;;  - completion-at-point: For globals, methods, functions, table keys, and
 ;;    filenames in strings.
-;;  - font-locking using `lua-ts-mode' for input
+;;  - font-locking using `lua-ts-mode' or `lua-mode' for input
+;;  - compilation errors
 ;;
 ;; TODO:
 ;;  - Add filename, line number info to regions loaded into repl 
@@ -45,16 +46,55 @@
 ;;; Code:
 
 (require 'comint)
-(require 'lua-ts-mode)
 
 (defgroup inf-lua nil
   "Run Lua process in a buffer."
   :group 'languages)
 
+(defcustom inf-lua-command "lua"
+  "Command to run inferior Lua process."
+  :type 'string
+  :risky t
+  :group 'inf-lua)
+
+(defcustom inf-lua-arguments '("-i")
+  "Command line arguments for `inf-lua-command'."
+  :type '(repeat string)
+  :group 'inf-lua)
+
 (defcustom inf-lua-buffer-name "Lua"
   "Default buffer name for the Lua interpreter."
   :type 'string
   :safe 'stringp
+  :group 'inf-lua)
+
+(defcustom inf-lua-prompt "> "
+  "Regexp matching the top-level prompt used by the inferior Lua process."
+  :type 'regexp
+  :safe 'stringp
+  :group 'inf-lua)
+
+(defcustom inf-lua-prompt-continue ">> "
+  "Regexp matching the continuation prompt used by the inferior Lua process."
+  :type 'regexp
+  :safe 'stringp
+  :group 'inf-lua)
+
+(defcustom inf-lua-debug-prompt (rx (or "lua_debug" "debugger.lua") "> ")
+  "Regexp matching debugger prompts used by the inferior Lua process."
+  :type 'regexp
+  :safe 'stringp
+  :group 'inf-lua)
+
+(defcustom inf-lua-history-filename nil
+  "File used to save command history of the inferior Lua process."
+  :type '(choice (const :tag "None" nil) file)
+  :safe 'string-or-null-p
+  :group 'inf-lua)
+
+(defcustom inf-lua-startfile nil
+  "File to load into the inferior Lua process at startup."
+  :type '(choice (const :tag "None" nil) (file :must-match t))
   :group 'inf-lua)
 
 (defcustom inf-lua-font-lock-enable t
@@ -67,7 +107,6 @@
   :type 'boolean
   :group 'inf-lua)
 
-(defvar inf-lua-prompt-debugger-regexp "debugger.lua>")
 
 (defvar inf-lua-repl-compilation-regexp-alist
   '(;; debugger.lua
@@ -76,15 +115,12 @@
     ;; `lua-traceback-line-re'
     ("^\\(?:[\t ]*\\|.*>[\t ]+\\)\\(?:[^\n\t ]+:[0-9]+:[\t ]*\\)*\\(?:\\([^\n\t ]+\\):\\([0-9]+\\):\\)" 1 2)))
 
+
 (defun inf-lua-calculate-command (&optional prompt default)
-  (setq default (or default (concat
-                             lua-ts-inferior-program " "
-                             (mapconcat 'identity lua-ts-inferior-options " "))))
+  (unless default
+    (setq default (concat inf-lua-command " "
+                          (mapconcat 'identity inf-lua-arguments " "))))
   (if prompt (read-shell-command "Run Lua: " default) default))
-;; Dont use '-e' in case repl doesn't support it, eg. rep.lua
-;; (when inf-lua-completion-enabled
-;;   (format " -e \"%s\"" (replace-regexp-in-string
-;;                         "\\\\" "\\\\\\\\" inf-lua--completion-code)))
 
 (defun inf-lua-buffer ()
   "Return inferior Lua buffer for current buffer."
@@ -107,15 +143,22 @@
          (buffer (inf-lua-make-comint
                   cmd
                   inf-lua-buffer-name
-                  (or startfile lua-ts-inferior-startfile)
+                  (or startfile inf-lua-startfile)
                   show)))
     (get-buffer-process buffer)))
+
+(defun inf-lua--write-history (process _)
+  "Write history file for inferior Lua PROCESS."
+  (when inf-lua-history-filename
+    (let ((buffer (process-buffer process)))
+      (when (and buffer (buffer-live-p buffer))
+        (with-current-buffer buffer (comint-write-input-ring))))))
 
 (defun inf-lua-make-comint (cmd proc-name &optional startfile show)
   "Create a Lua comint buffer.
 CMD is the Lua command to be executed and PROC-NAME is the process name
 that will be given to the comint buffer.
-If STARTFILE is non-nil, use that instead of `lua-ts-inferior-startfile'
+If STARTFILE is non-nil, use that instead of `inf-lua-startfile'
 which is used by default. See `make-comint' for details of STARTFILE.
 If SHOW is non-nil, display the Lua comint buffer after it is created.
 Returns the name of the created comint buffer."
@@ -129,9 +172,8 @@ Returns the name of the created comint buffer."
                             program
                             startfile
                             args)))
-        (when lua-ts-inferior-history
-          (set-process-sentinel
-           (get-buffer-process buffer) #'lua-ts-inferior--write-history))
+        (set-process-sentinel
+         (get-buffer-process buffer) #'inf-lua--write-history)
         (with-current-buffer buffer
           (inf-lua-mode)
           (when inf-lua-completion-enabled
@@ -140,24 +182,33 @@ Returns the name of the created comint buffer."
       (pop-to-buffer proc-buff-name))
     proc-buff-name))
 
-;; Defined in `lua-ts-inferior-lua'
+(defvar-local inf-lua--prompt-regex nil)
+
+(defun inf-lua-calculate-prompt-regexps ()
+  (setq inf-lua--prompt-regex
+        (rx-to-string
+         `(: (or (regexp ,inf-lua-debug-prompt)
+                 (regexp ,inf-lua-prompt-continue)
+                 (regexp ,inf-lua-prompt))))))
+
 (defun inf-lua--preoutput-filter (string)
-  (if (or (not (equal (buffer-name) lua-ts-inferior-buffer))
-          (equal string (concat lua-ts-inferior-prompt-continue " ")))
-      string
-    (concat
-     ;; Filter out the extra prompt characters that
-     ;; accumulate in the output when sending regions
-     ;; to the inferior process.
-     (replace-regexp-in-string (rx-to-string
-                                `(: bol
-                                    (* ,lua-ts-inferior-prompt
-                                       (? ,lua-ts-inferior-prompt)
-                                       (1+ space))
-                                    (group (* nonl))))
-                               "\\1" string)
-     ;; Re-add the prompt for the next line.
-     lua-ts-inferior-prompt " ")))
+  ;; Filter out the extra prompt characters that
+  ;; accumulate in the output when sending regions
+  ;; to the inferior process.
+  (setq string (replace-regexp-in-string
+                (rx-to-string
+                 `(: bol
+                     (* (regexp ,inf-lua--prompt-regex))
+                     (group (regexp ,inf-lua--prompt-regex)
+                            (* nonl))))
+                "\\1" string))
+  (if (and (not (bolp))
+           (string-match-p
+            (concat "\\`" inf-lua--prompt-regex) string))
+      ;; Stop prompts from stacking up when sending regions:
+      ;; > > >
+      (concat "\n" string)
+    string))
 
 ;; (defvar inf-lua-output-filter-buffer nil)
 ;; (defun inf-lua-output-filter (string)
@@ -338,8 +389,7 @@ end")
                        (and repl-buffer-p
                             (< (point) (cdr prompt-boundaries)))
                        (and (not repl-buffer-p)
-                            (string-match-p
-                             inf-lua-prompt-debugger-regexp prompt)))
+                            (string-match-p inf-lua-debug-prompt prompt)))
                    #'ignore)
                   (filename-p #'ignore)
                   (t #'inf-lua--get-completions-from-process))))
@@ -381,7 +431,7 @@ end")
 Signals an error if no shell buffer is available for current buffer."
   (declare (indent 0) (debug t))
   (let ((shell-process (make-symbol "shell-process")))
-    `(let ((,shell-process (get-buffer-process lua-ts-inferior-buffer)))
+    `(let ((,shell-process (inf-lua-process)))
        (unless ,shell-process
          (user-error "Start a Lua process first"))
        (with-current-buffer (process-buffer ,shell-process)
@@ -402,8 +452,11 @@ also `with-current-buffer'."
        (when (not font-lock-mode)
          (font-lock-mode 1))
        (setq-local delay-mode-hooks t)
-       (when (not (derived-mode-p 'lua-ts-mode))
-         (lua-ts-mode))
+       (when (not (derived-mode-p '(lua-ts-mode lua-mode)))
+         (cond
+          ((fboundp 'lua-ts-mode) (lua-ts-mode))
+          ((fboundp 'lua-mode) (lua-mode))
+          (t nil)))
        ,@body)))
 
 (defun inf-lua-font-lock-kill-buffer ()
@@ -475,9 +528,7 @@ goes wrong and syntax highlighting in the shell gets messed up."
    (concat
     "\r?\n?"
     ;; Remove initial caret from calculated regexp
-    (replace-regexp-in-string
-     (rx string-start ?^) ""
-     lua-ts-inferior-prompt)
+    (replace-regexp-in-string (rx string-start ?^) "" inf-lua-prompt)
     (rx eos))
    output))
 
@@ -486,7 +537,7 @@ goes wrong and syntax highlighting in the shell gets messed up."
   (unless (string= output "")
     (if (let ((output (ansi-color-filter-apply output)))
           (and (inf-lua-comint-end-of-output-p output)
-               (not (string-match lua-ts-inferior-prompt-continue output))))
+               (not (string-match inf-lua-prompt-continue output))))
         ;; If output ends with an initial (not continuation) input prompt
         ;; then the font-lock buffer must be cleaned up.
         (inf-lua-font-lock-cleanup-buffer)
@@ -519,22 +570,20 @@ goes wrong and syntax highlighting in the shell gets messed up."
 (define-derived-mode inf-lua-mode comint-mode "Lua"
   "Major mode for lua repl.
 \\<inf-lua-mode-map>"
-  (setq-local comment-start "--"
+  (setq-local mode-line-process '(":%s")
+              comment-start "--"
               comment-end ""
               comment-start-skip "--+ *"
               parse-sexp-ignore-comments t
               parse-sexp-lookup-properties t)
 
-  (setq-local mode-line-process '(":%s"))
+  (inf-lua-calculate-prompt-regexps)
 
   (setq-local comint-input-ignoredups t
-              comint-input-ring-file-name lua-ts-inferior-history
+              comint-input-ring-file-name inf-lua-history-filename
               comint-prompt-read-only t
-              comint-prompt-regexp (rx-to-string
-                                    `(: bol ,lua-ts-inferior-prompt
-                                        (1+ space)))
-              comint-output-filter-functions '(ansi-color-process-output
-                                               comint-watch-for-password-prompt)
+              comint-prompt-regexp inf-lua--prompt-regex
+              comint-output-filter-functions '(ansi-color-process-output)
               comint-highlight-input nil)
   (add-hook 'comint-preoutput-filter-functions #'inf-lua--preoutput-filter nil t)  
 
