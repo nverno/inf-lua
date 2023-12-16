@@ -186,10 +186,9 @@ Returns the name of the created comint buffer."
 
 (defun inf-lua-calculate-prompt-regexps ()
   (setq inf-lua--prompt-regex
-        (rx-to-string
-         `(: (or (regexp ,inf-lua-debug-prompt)
-                 (regexp ,inf-lua-prompt-continue)
-                 (regexp ,inf-lua-prompt))))))
+        (rx-to-string `(: (or (regexp ,inf-lua-debug-prompt)
+                              (regexp ,inf-lua-prompt-continue)
+                              (regexp ,inf-lua-prompt))))))
 
 (defun inf-lua--preoutput-filter (string)
   ;; Filter out the extra prompt characters that
@@ -303,7 +302,7 @@ end")
   "Setup completion in Lua repl."
   (interactive)
   (if-let ((process (inf-lua-process)))
-      (progn (comint-send-string process inf-lua--completion-code)
+      (progn (comint-send-string process (concat inf-lua--completion-code "\n"))
              (setq inf-lua-completion-enabled t))
     (user-error "Start a lua process first")))
 
@@ -387,9 +386,8 @@ end")
           (with-current-buffer proc-buff
             (cond ((or (null prompt)
                        (and repl-buffer-p
-                            (< (point) (cdr prompt-boundaries)))
-                       (and (not repl-buffer-p)
-                            (string-match-p inf-lua-debug-prompt prompt)))
+                            (or (< (point) (cdr prompt-boundaries))
+                                (string-match-p inf-lua-debug-prompt prompt))))
                    #'ignore)
                   (filename-p #'ignore)
                   (t #'inf-lua--get-completions-from-process))))
