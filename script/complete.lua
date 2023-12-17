@@ -6,7 +6,7 @@ function __REPL_complete(line, initial_scope)
   local prefix = string.match(rest, '^[%a_][%a%d_]*')
   if prefix and prefix ~= rest then return print() end
   local function get_scope(scope)
-    if not scope or scope == '' then return _G end
+    if not scope or scope == '' then return _ENV or _G end
     local f = load('return ' .. scope)
     if f then
       local ok
@@ -57,9 +57,5 @@ function __REPL_complete(line, initial_scope)
     items[#items + 1] = key
   end
   table.sort(items)
-  if #items == 1 then
-    return print(items[1])
-  elseif #items > 1 then
-    return print(table.concat(items, '\n'))
-  end
+  return print(table.concat(items, '\n'))
 end
