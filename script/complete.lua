@@ -1,5 +1,10 @@
 -- TODO: Add keywords with there is no base / scope
 
+local keywords = {
+  "and", "do", "else", "elseif", "end", "for", "function", "goto", "if",
+  "in", "local", "not", "or", "repeat", "return", "then", "until", "while"
+}
+
 function __REPL_complete(line, initial_scope)
   local base, sep, rest = string.match(line, '^(.*)([.:])(.*)')
   if not base then rest = line end
@@ -20,6 +25,7 @@ function __REPL_complete(line, initial_scope)
     end
     return {}
   end
+
   local scope = get_scope(initial_scope) --- @type table
   if not scope then return print() end
   local meth = sep == ':'
@@ -45,7 +51,7 @@ function __REPL_complete(line, initial_scope)
   while type(scope) == 'table' do
     for key, value in pairs(scope) do
       if (prop or (type(value) == 'function')) and
-           ((not prefix) or (string.match(key, '^' .. prefix))) then
+          ((not prefix) or (string.match(key, '^' .. prefix))) then
         matches[key] = true
       end
     end

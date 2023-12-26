@@ -35,7 +35,7 @@
 ;;  - compilation errors
 ;;
 ;; TODO:
-;;  - Add filename, line number info to regions loaded into repl 
+;;  - Add filename, line number info to regions loaded into repl
 ;;    (`lua-send-region') so tracebacks work
 ;;  - setup debugger tracking
 ;;    possible to switch into `gud-lua' somehow?
@@ -182,10 +182,10 @@ Returns the name of the created comint buffer."
       (pop-to-buffer proc-buff-name))
     proc-buff-name))
 
-(defvar-local inf-lua--prompt-regex nil)
+(defvar-local inf-lua--prompt-internal nil)
 
 (defun inf-lua-calculate-prompt-regexps ()
-  (setq inf-lua--prompt-regex
+  (setq inf-lua--prompt-internal
         (rx-to-string `(: (or (regexp ,inf-lua-debug-prompt)
                               (regexp ,inf-lua-prompt-continue)
                               (regexp ,inf-lua-prompt))))))
@@ -197,38 +197,17 @@ Returns the name of the created comint buffer."
   (setq string (replace-regexp-in-string
                 (rx-to-string
                  `(: bol
-                     (* (regexp ,inf-lua--prompt-regex))
-                     (group (regexp ,inf-lua--prompt-regex)
+                     (* (regexp ,inf-lua--prompt-internal))
+                     (group (regexp ,inf-lua--prompt-internal)
                             (* nonl))))
                 "\\1" string))
   (if (and (not (bolp))
            (string-match-p
-            (concat "\\`" inf-lua--prompt-regex) string))
+            (concat "\\`" inf-lua--prompt-internal) string))
       ;; Stop prompts from stacking up when sending regions:
       ;; > > >
       (concat "\n" string)
     string))
-
-;; (defvar inf-lua-output-filter-buffer nil)
-;; (defun inf-lua-output-filter (string)
-;;   (setq inf-lua-output-filter-buffer
-;;         (concat inf-lua-output-filter-buffer string)))
-
-;; (defun inf-lua-send-string-no-output (string &optional process)
-;;   (or process (setq process (or (inf-lua-process)
-;;                                 (user-error "No lua process found"))))
-;;   (cl-letf* (((process-filter process)
-;;               (lambda (_proc str)
-;;                 (with-current-buffer (process-buffer process)
-;;                   (inf-lua--preoutput-filter str))))
-;;              (inhibit-quit t)
-;;              (buffer (process-buffer process))
-;;              (last-prompt 'comint-last-prompt)
-;;              (last-prompt-value (buffer-local-value last-prompt buffer)))
-;;     (or
-;;      (with-local-quit
-;;        (unwind-protect
-;;            (comint-send-string process string))))))
 
 ;; -------------------------------------------------------------------
 ;;; Completion
@@ -293,7 +272,7 @@ function __REPL_complete(line, initial_scope)
   table.sort(items)
   return print(table.concat(items, '\\n'))
 end
-")
+")                            ; leave trailing newline so initial prompt is '> '
 
 (defun inf-lua-setup-completion ()
   "Setup completion in Lua repl."
@@ -307,6 +286,7 @@ end
   "Get completions for prefix INPUT in SCOPE from PROCESS."
   (cl-flet ((escape-string (s) (replace-regexp-in-string "\\\"" "\\\\\"" s)))
     (with-current-buffer (process-buffer process)
+      ;; FIXME: use temp buffer eventually
       (let ((redirect-buffer (get-buffer-create "* Lua completions redirect*"))
             (input-to-send
              (format "__REPL_complete(\"%s\", %s)"
@@ -333,7 +313,7 @@ end
                   (and include-scope
                        (pcase (char-before)
                          ((or ?. ?:) (forward-char -1) t)
-                         ;; XXX: include function calls? eg. "fn().prefix"
+                         ;; XXX: includes function calls eg. "fn().prefix"
                          ((or ?\) ?\] ) (backward-sexp) t)
                          (_ nil))))))
   (point))
@@ -416,146 +396,6 @@ end
              (comint-after-pmark-p))
     (inf-lua--completion-at-point (get-buffer-process (current-buffer)))))
 
-;; -------------------------------------------------------------------
-;;; Font-lock
-;; Stolen from `python.el'
-
-(defvar-local inf-lua--font-lock-buffer nil)
-
-(defmacro inf-lua-with-shell-buffer (&rest body)
-  "Execute the forms in BODY with the shell buffer temporarily current.
-Signals an error if no shell buffer is available for current buffer."
-  (declare (indent 0) (debug t))
-  (let ((shell-process (make-symbol "shell-process")))
-    `(let ((,shell-process (inf-lua-process)))
-       (unless ,shell-process
-         (user-error "Start a Lua process first"))
-       (with-current-buffer (process-buffer ,shell-process)
-         ,@body))))
-
-(defmacro inf-lua-font-lock-with-font-lock-buffer (&rest body)
-  "Execute the forms in BODY in the font-lock buffer.
-The value returned is the value of the last form in BODY.  See
-also `with-current-buffer'."
-  (declare (indent 0) (debug t))
-  `(inf-lua-with-shell-buffer
-     (save-current-buffer
-       (when (not (and inf-lua--font-lock-buffer
-                       (get-buffer inf-lua--font-lock-buffer)))
-         (setq inf-lua--font-lock-buffer
-               (inf-lua-font-lock-get-or-create-buffer)))
-       (set-buffer inf-lua--font-lock-buffer)
-       (when (not font-lock-mode)
-         (font-lock-mode 1))
-       (setq-local delay-mode-hooks t)
-       (when (not (derived-mode-p '(lua-ts-mode lua-mode)))
-         (cond
-          ((fboundp 'lua-ts-mode) (lua-ts-mode))
-          ((fboundp 'lua-mode) (lua-mode))
-          (t nil)))
-       ,@body)))
-
-(defun inf-lua-font-lock-kill-buffer ()
-  "Kill the font-lock buffer safely."
-  (when (and inf-lua--font-lock-buffer
-             (buffer-live-p inf-lua--font-lock-buffer))
-    (kill-buffer inf-lua--font-lock-buffer)
-    (when (derived-mode-p 'inf-lua-mode)
-      (setq inf-lua--font-lock-buffer nil))))
-
-(defun inf-lua-font-lock-get-or-create-buffer ()
-  "Get or create a font-lock buffer for current inferior process."
-  (inf-lua-with-shell-buffer
-    (if inf-lua--font-lock-buffer
-        inf-lua--font-lock-buffer
-      (let ((process-name
-             (process-name (get-buffer-process (current-buffer)))))
-        (generate-new-buffer
-         (format " *%s-font-lock*" process-name))))))
-
-(defun inf-lua-font-lock-post-command-hook ()
-  "Fontifies current line in inferior lua buffer."
-  (let ((prompt-end (cdr comint-last-prompt)))
-    (when (and prompt-end (> (point) prompt-end)
-               (process-live-p (get-buffer-process (current-buffer))))
-      (let* ((input (buffer-substring-no-properties
-                     prompt-end (point-max)))
-             (deactivate-mark nil)
-             (start-pos prompt-end)
-             (buffer-undo-list t)
-             (replacement
-              (inf-lua-font-lock-with-font-lock-buffer
-                (delete-region (point-min) (point-max))
-                (insert input)
-                (font-lock-ensure)
-                (buffer-string)))
-             (replacement-length (length replacement))
-             (i 0))
-        ;; Inject text properties to get input fontified.
-        (while (not (= i replacement-length))
-          (let* ((plist (text-properties-at i replacement))
-                 (next-change (or (next-property-change i replacement)
-                                  replacement-length))
-                 (plist (let ((face (plist-get plist 'face)))
-                          (if (not face)
-                              plist
-                            ;; Replace FACE text properties with
-                            ;; FONT-LOCK-FACE so input is fontified.
-                            (plist-put plist 'face nil)
-                            (plist-put plist 'font-lock-face face)))))
-            (set-text-properties
-             (+ start-pos i) (+ start-pos next-change) plist)
-            (setq i next-change)))))))
-
-(defun inf-lua-font-lock-cleanup-buffer ()
-  "Cleanup the font-lock buffer.
-Provided as a command because this might be handy if something
-goes wrong and syntax highlighting in the shell gets messed up."
-  (interactive)
-  (inf-lua-with-shell-buffer
-    (inf-lua-font-lock-with-font-lock-buffer
-      (erase-buffer))))
-
-(defun inf-lua-comint-end-of-output-p (output)
-  "Return non-nil if OUTPUT ends with input prompt."
-  (string-match
-   ;; XXX: It seems on macOS an extra carriage return is attached
-   ;; at the end of output, this handles that too.
-   (concat
-    "\r?\n?"
-    ;; Remove initial caret from calculated regexp
-    (replace-regexp-in-string (rx string-start ?^) "" inf-lua-prompt)
-    (rx eos))
-   output))
-
-(defun inf-lua-font-lock-comint-output-filter-function (output)
-  "Clean up the font-lock buffer after any OUTPUT."
-  (unless (string= output "")
-    (if (let ((output (ansi-color-filter-apply output)))
-          (and (inf-lua-comint-end-of-output-p output)
-               (not (string-match inf-lua-prompt-continue output))))
-        ;; If output ends with an initial (not continuation) input prompt
-        ;; then the font-lock buffer must be cleaned up.
-        (inf-lua-font-lock-cleanup-buffer)
-      ;; Otherwise just add a newline.
-      (inf-lua-font-lock-with-font-lock-buffer
-        (goto-char (point-max))
-        (newline)))
-    output))
-
-(defun inf-lua-font-lock-turn-on (&optional msg)
-  (interactive "p")
-  (inf-lua-with-shell-buffer
-    (inf-lua-font-lock-kill-buffer)
-    (setq-local inf-lua--font-lock-buffer nil)
-    (add-hook 'post-command-hook
-              #'inf-lua-font-lock-post-command-hook nil t)
-    (add-hook 'kill-buffer-hook #'inf-lua-font-lock-kill-buffer nil t)
-    (add-hook 'comint-output-filter-functions
-              #'inf-lua-font-lock-comint-output-filter-function 'append))
-  (when msg
-    (message "Inf lua font-lock enabled")))
-
 
 (defvar inf-lua-mode-map
   (let ((map (make-sparse-keymap)))
@@ -578,17 +418,29 @@ goes wrong and syntax highlighting in the shell gets messed up."
   (setq-local comint-input-ignoredups t
               comint-input-ring-file-name inf-lua-history-filename
               comint-prompt-read-only t
-              comint-prompt-regexp inf-lua--prompt-regex
+              comint-prompt-regexp inf-lua--prompt-internal
               comint-output-filter-functions '(ansi-color-process-output)
               comint-highlight-input nil)
-  (add-hook 'comint-preoutput-filter-functions #'inf-lua--preoutput-filter nil t)  
+  (add-hook 'comint-preoutput-filter-functions #'inf-lua--preoutput-filter nil t)
 
   ;; compilation
   (setq-local compilation-error-regexp-alist inf-lua-repl-compilation-regexp-alist)
   (compilation-shell-minor-mode t)
 
-  (when inf-lua-font-lock-enable
-    (inf-lua-font-lock-turn-on))
+  ;; Font-locking
+  (when (and (null comint-use-prompt-regexp)
+             inf-lua-font-lock-enable
+             (or (require 'lua-ts-mode nil t)
+                 (require 'lua-mode nil t)))
+    (comint-fontify-input-mode))
+
+  (setq comint-indirect-setup-function (lambda ()
+                                         (let ((inhibit-message t)
+                                               (message-log-max nil))
+                                           (cond ((fboundp 'lua-ts-mode) (lua-ts-mode))
+                                                 ((fboundp 'lua-mode) (lua-mode))
+                                                 (t nil)))))
+
   (add-hook 'completion-at-point-functions #'inf-lua-completion-at-point nil t))
 
 (provide 'inf-lua)
