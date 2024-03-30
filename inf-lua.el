@@ -1,11 +1,11 @@
-;;; inf-lua.el --- Lua repl mode -*- lexical-binding: t; -*-
+;;; inf-lua.el --- Run a Lua repl in an inferior process -*- lexical-binding: t; -*-
 
 ;; Author: Noah Peart <noah.v.peart@gmail.com>
 ;; URL: https://github.com/nverno/inf-lua
 ;; Version: 0.0.1
 ;; Package-Requires: ((emacs "29.1"))
 ;; Created:  9 December 2023
-;; Keywords: lua languages
+;; Keywords: lua, languages
 
 ;; This file is not part of GNU Emacs.
 ;;
@@ -49,63 +49,54 @@
 
 (defgroup inf-lua nil
   "Run Lua process in a buffer."
-  :group 'languages)
+  :group 'languages
+  :prefix "inf-lua-")
 
 (defcustom inf-lua-command "lua"
   "Command to run inferior Lua process."
   :type 'string
-  :risky t
-  :group 'inf-lua)
+  :risky t)
 
 (defcustom inf-lua-arguments '("-i")
   "Command line arguments for `inf-lua-command'."
-  :type '(repeat string)
-  :group 'inf-lua)
+  :type '(repeat string))
 
 (defcustom inf-lua-buffer-name "Lua"
   "Default buffer name for the Lua interpreter."
   :type 'string
-  :safe 'stringp
-  :group 'inf-lua)
+  :safe 'stringp)
 
 (defcustom inf-lua-prompt "> "
   "Regexp matching the top-level prompt used by the inferior Lua process."
   :type 'regexp
-  :safe 'stringp
-  :group 'inf-lua)
+  :safe 'stringp)
 
 (defcustom inf-lua-prompt-continue ">> "
   "Regexp matching the continuation prompt used by the inferior Lua process."
   :type 'regexp
-  :safe 'stringp
-  :group 'inf-lua)
+  :safe 'stringp)
 
 (defcustom inf-lua-debug-prompt (rx (or "lua_debug" "debugger.lua") "> ")
   "Regexp matching debugger prompts used by the inferior Lua process."
   :type 'regexp
-  :safe 'stringp
-  :group 'inf-lua)
+  :safe 'stringp)
 
 (defcustom inf-lua-history-filename nil
   "File used to save command history of the inferior Lua process."
   :type '(choice (const :tag "None" nil) file)
-  :safe 'string-or-null-p
-  :group 'inf-lua)
+  :safe 'string-or-null-p)
 
 (defcustom inf-lua-startfile nil
   "File to load into the inferior Lua process at startup."
-  :type '(choice (const :tag "None" nil) (file :must-match t))
-  :group 'inf-lua)
+  :type '(choice (const :tag "None" nil) (file :must-match t)))
 
 (defcustom inf-lua-font-lock-enable t
   "Non-nil to enable font-locking in the repl buffer."
-  :type 'boolean
-  :group 'inf-lua)
+  :type 'boolean)
 
 (defcustom inf-lua-completion-enabled t
   "Enable/disable inferior lua completion at point."
-  :type 'boolean
-  :group 'inf-lua)
+  :type 'boolean)
 
 
 (defvar inf-lua-repl-compilation-regexp-alist
@@ -117,6 +108,8 @@
 
 
 (defun inf-lua-calculate-command (&optional prompt default)
+  "Calculate command to start repl.
+If PROMPT is non-nil, read command interactively using DEFAULT if non-nil."
   (unless default
     (setq default (concat inf-lua-command " "
                           (mapconcat 'identity inf-lua-arguments " "))))
@@ -137,7 +130,11 @@
 
 ;;;###autoload
 (defun inf-lua-run (&optional prompt cmd startfile show)
-  "Run a Lua interpreter in an inferior process."
+  "Run a Lua interpreter in an inferior process.
+With prefix, PROMPT, read command.
+If CMD is non-nil, use it to start repl.
+STARTFILE overrides `inf-lua-startfile' when present.
+When called interactively, or with SHOW, show the repl buffer after starting."
   (interactive (list current-prefix-arg nil nil t))
   (let* ((cmd (inf-lua-calculate-command prompt cmd))
          (buffer (inf-lua-make-comint
@@ -184,16 +181,17 @@ Returns the name of the created comint buffer."
 
 (defvar-local inf-lua--prompt-internal nil)
 
-(defun inf-lua-calculate-prompt-regexps ()
+(defun inf-lua--calculate-prompt-regexps ()
+  "Calculate regexp to match prompt."
   (setq inf-lua--prompt-internal
         (rx-to-string `(: (or (regexp ,inf-lua-debug-prompt)
                               (regexp ,inf-lua-prompt-continue)
                               (regexp ,inf-lua-prompt))))))
 
 (defun inf-lua--preoutput-filter (string)
-  ;; Filter out the extra prompt characters that
-  ;; accumulate in the output when sending regions
-  ;; to the inferior process.
+  "Filter for `comint-preoutput-filter-functions' to process STRING.
+Filters extra prompt characters that accumulate in the output when
+sending regions to the inferior process."
   (setq string (replace-regexp-in-string
                 (rx-to-string
                  `(: bol
@@ -308,6 +306,9 @@ end
 (defvar-local inf-lua--capf-cache nil)
 
 (defun inf-lua--beginning-of-sexp (lim &optional include-scope)
+  "Move point to beginning of preceding Lua sexp, bounded by LIM.
+When INCLUDE-SCOPE is non-nil, move to beginning of preceding chained
+command, eg. move to beginning of \"t[i].fn().prefix\"."
   (while (and (> (point) lim)
               (or (not (zerop (skip-syntax-backward "w_")))
                   (and include-scope
@@ -319,6 +320,7 @@ end
   (point))
 
 (defun inf-lua--completion-at-point (&optional process)
+  "Generate completions at point from PROCESS."
   (setq process (or process (get-buffer-process (current-buffer))))
   (let* ((repl-buffer-p (derived-mode-p 'inf-lua-mode))
          (line-start (if repl-buffer-p
@@ -397,10 +399,9 @@ end
     (inf-lua--completion-at-point (get-buffer-process (current-buffer)))))
 
 
-(defvar inf-lua-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "TAB") #'completion-at-point)
-    map))
+(defvar-keymap inf-lua-mode-map
+  :doc "Keymap in inferior Lua buffer."
+  "TAB" #'completion-at-point)
 
 ;;;###autoload
 (define-derived-mode inf-lua-mode comint-mode "Lua"
@@ -413,7 +414,7 @@ end
               parse-sexp-ignore-comments t
               parse-sexp-lookup-properties t)
 
-  (inf-lua-calculate-prompt-regexps)
+  (inf-lua--calculate-prompt-regexps)
 
   (setq-local comint-input-ignoredups t
               comint-input-ring-file-name inf-lua-history-filename
@@ -423,7 +424,7 @@ end
               comint-highlight-input nil)
   (add-hook 'comint-preoutput-filter-functions #'inf-lua--preoutput-filter nil t)
 
-  ;; compilation
+  ;; Compilation
   (setq-local compilation-error-regexp-alist inf-lua-repl-compilation-regexp-alist)
   (compilation-shell-minor-mode t)
 
@@ -434,12 +435,13 @@ end
                  (require 'lua-mode nil t)))
     (comint-fontify-input-mode))
 
-  (setq comint-indirect-setup-function (lambda ()
-                                         (let ((inhibit-message t)
-                                               (message-log-max nil))
-                                           (cond ((fboundp 'lua-ts-mode) (lua-ts-mode))
-                                                 ((fboundp 'lua-mode) (lua-mode))
-                                                 (t nil)))))
+  (setq comint-indirect-setup-function
+        (lambda ()
+          (let ((inhibit-message t)
+                (message-log-max nil))
+            (cond ((fboundp 'lua-ts-mode) (lua-ts-mode))
+                  ((fboundp 'lua-mode) (lua-mode))
+                  (t nil)))))
 
   (add-hook 'completion-at-point-functions #'inf-lua-completion-at-point nil t))
 
