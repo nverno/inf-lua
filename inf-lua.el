@@ -2,7 +2,7 @@
 
 ;; Author: Noah Peart <noah.v.peart@gmail.com>
 ;; URL: https://github.com/nverno/inf-lua
-;; Version: 0.0.1
+;; Version: 0.1.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Created:  9 December 2023
 ;; Keywords: lua, languages
@@ -103,6 +103,8 @@
   '(;; debugger.lua
     ("^[>]?\\s-*break via dbg.+=> \\([^:]+\\):\\([0-9]+\\)" 1 2)
     ("^\\s-*[0-9]+\\(?: =>\\)?\\s-*\\([^:]+\\):\\([0-9]+\\)" 1 2)
+    ;; rep.lua
+    ("^\\[string \"REPL\"]:1: \\([^:]+\\):\\([0-9]+\\)" 1 2)
     ;; `lua-traceback-line-re'
     ("^\\(?:[\t ]*\\|.*>[\t ]+\\)\\(?:[^\n\t ]+:[0-9]+:[\t ]*\\)*\\(?:\\([^\n\t ]+\\):\\([0-9]+\\):\\)" 1 2)))
 
@@ -206,6 +208,25 @@ sending regions to the inferior process."
       ;; > > >
       (concat "\n" string)
     string))
+
+
+;;; TODO(5/21/24): send string function to convert strings to literals
+;; and load in Lua repl for source locations in errors (see `lua-send-region')
+(defun inf-lua-string-to-literal (string)
+  "Convert STRING to Lua literal."
+  (concat "'" (cl-reduce
+               (lambda (string rep)
+                 (replace-regexp-in-string (car rep) (cdr rep) string))
+               '(("[\"'\\]" . "\\\\\\&")
+                 ("\t" . "\\\\t")
+                 ("\n" . "\\\\n"))
+               :initial-value string)
+          "'"))
+
+;;; TODO(5/31/24): buffer tracking if lua repl enters debug
+;; see `python-pdbtrack-setup-tracking' for inspiration
+(defun inf-lua-dbg-setup-tracking ()
+  "Setup lua debugger tracking in current buffer.")
 
 ;; -------------------------------------------------------------------
 ;;; Completion
@@ -413,9 +434,7 @@ command, eg. move to beginning of \"t[i].fn().prefix\"."
               comment-start-skip "--+ *"
               parse-sexp-ignore-comments t
               parse-sexp-lookup-properties t)
-
   (inf-lua--calculate-prompt-regexps)
-
   (setq-local comint-input-ignoredups t
               comint-input-ring-file-name inf-lua-history-filename
               comint-prompt-read-only t
@@ -423,6 +442,7 @@ command, eg. move to beginning of \"t[i].fn().prefix\"."
               comint-output-filter-functions '(ansi-color-process-output)
               comint-highlight-input nil)
   (add-hook 'comint-preoutput-filter-functions #'inf-lua--preoutput-filter nil t)
+  (setq-local scroll-conservatively 1)
 
   ;; Compilation
   (setq-local compilation-error-regexp-alist inf-lua-repl-compilation-regexp-alist)
@@ -443,7 +463,8 @@ command, eg. move to beginning of \"t[i].fn().prefix\"."
                   ((fboundp 'lua-mode) (lua-mode))
                   (t nil)))))
 
-  (add-hook 'completion-at-point-functions #'inf-lua-completion-at-point nil t))
+  (add-hook 'completion-at-point-functions #'inf-lua-completion-at-point nil t)
+  (inf-lua-dbg-setup-tracking))
 
 (provide 'inf-lua)
 ;; Local Variables:
