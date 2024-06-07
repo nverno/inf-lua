@@ -45,6 +45,7 @@
 ;;
 ;;; Code:
 
+(require 'lua-ts-mode)                  ; syntax-table
 (require 'comint)
 
 (defgroup inf-lua nil
@@ -201,13 +202,15 @@ sending regions to the inferior process."
                      (group (regexp ,inf-lua--prompt-internal)
                             (* nonl))))
                 "\\1" string))
-  (if (and (not (bolp))
-           (string-match-p
-            (concat "\\`" inf-lua--prompt-internal) string))
-      ;; Stop prompts from stacking up when sending regions:
-      ;; > > >
-      (concat "\n" string)
-    string))
+  (when (and (not (bolp))
+             (string-match-p
+              (concat "\\`" inf-lua--prompt-internal) string))
+    ;; Stop prompts from stacking up when sending regions: > > >
+    (setq string (concat "\n" string)))
+  (replace-regexp-in-string
+   ;; Useless error prefixes in rep.lua
+   "^\\(\\[string \"REPL\"\\]:[0-9]+: \\)" "Error: "
+   string))
 
 
 ;;; TODO(5/21/24): send string function to convert strings to literals
@@ -227,6 +230,27 @@ sending regions to the inferior process."
 ;; see `python-pdbtrack-setup-tracking' for inspiration
 (defun inf-lua-dbg-setup-tracking ()
   "Setup lua debugger tracking in current buffer.")
+
+
+;;; Font-locking
+(defvar inf-lua-font-lock-keywords
+  `(;; Tracebacks (rep.lua)
+    (,(rx-to-string `(seq bol (group "Error") ": " (group (* nonl))))
+     (1 'font-lock-warning-face prepend)
+     (2 '(:inherit font-lock-warning-face :slant italic :weight normal) prepend))
+    (,(rx-to-string `(seq ": " (group  "in function ") "'" (group (+ (not "'"))) "'"))
+     (1 'font-lock-comment-face)
+     (2 'font-lock-function-name-face prepend))
+    (": \\(in \\(?:main chunk\\|?\\)\\)" (1 'font-lock-comment-face))
+    (,(rx-to-string `(seq (group "(...") (group "tail calls") (group "...)")))
+     (1 'font-lock-comment-face)
+     (2 'font-lock-doc-markup-face)
+     (3 'font-lock-comment-face))
+    (,(rx-to-string `(seq bol "stack traceback")) . font-lock-preprocessor-face)
+    ("\\[C\\]" . font-lock-constant-face)
+    ("\\[string \"REPL\"\\]:.*" . font-lock-comment-face))
+  "Additional font-locking keywords in `inf-lua-mode'.")
+
 
 ;; -------------------------------------------------------------------
 ;;; Completion
@@ -428,6 +452,7 @@ command, eg. move to beginning of \"t[i].fn().prefix\"."
 (define-derived-mode inf-lua-mode comint-mode "Lua"
   "Major mode for lua repl.
 \\<inf-lua-mode-map>"
+  :syntax-table lua-ts--syntax-table
   (setq-local mode-line-process '(":%s")
               comment-start "--"
               comment-end ""
@@ -444,11 +469,8 @@ command, eg. move to beginning of \"t[i].fn().prefix\"."
   (add-hook 'comint-preoutput-filter-functions #'inf-lua--preoutput-filter nil t)
   (setq-local scroll-conservatively 1)
 
-  ;; Compilation
-  (setq-local compilation-error-regexp-alist inf-lua-repl-compilation-regexp-alist)
-  (compilation-shell-minor-mode t)
-
   ;; Font-locking
+  (setq-local font-lock-defaults '(inf-lua-font-lock-keywords nil nil))
   (when (and (null comint-use-prompt-regexp)
              inf-lua-font-lock-enable
              (or (require 'lua-ts-mode nil t)
@@ -462,6 +484,12 @@ command, eg. move to beginning of \"t[i].fn().prefix\"."
             (cond ((fboundp 'lua-ts-mode) (lua-ts-mode))
                   ((fboundp 'lua-mode) (lua-mode))
                   (t nil)))))
+
+  ;; Compilation
+  (setq-local compilation-error-regexp-alist inf-lua-repl-compilation-regexp-alist)
+  (compilation-shell-minor-mode t)
+  ;; XXX: probably dont do this
+  (face-remap-add-relative 'compilation-error 'link)
 
   (add-hook 'completion-at-point-functions #'inf-lua-completion-at-point nil t)
   (inf-lua-dbg-setup-tracking))
