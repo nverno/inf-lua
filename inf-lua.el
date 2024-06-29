@@ -100,12 +100,20 @@
   :type 'boolean)
 
 
+(defvar inf-lua--internal-error-re
+  (rx (or "[string \"REPL\"]" "stdin") ":" (+ digit) ":")
+  "Regexp to match useless internal repl error locations.
+For rep.lua, \\='[string \"REPL\"]:*:', and Lua \\='stdin:1:'.")
+
 (defvar inf-lua-repl-compilation-regexp-alist
-  '(;; debugger.lua
+  `(;; debugger.lua
     ("^[>]?\\s-*break via dbg.+=> \\([^:]+\\):\\([0-9]+\\)" 1 2)
     ("^\\s-*[0-9]+\\(?: =>\\)?\\s-*\\([^:]+\\):\\([0-9]+\\)" 1 2)
-    ;; rep.lua
-    ("^\\[string \"REPL\"]:1: \\([^:]+\\):\\([0-9]+\\)" 1 2)
+    ;; first line of traceback
+    (,(rx-to-string
+       `(seq bol (or (regexp ,inf-lua--internal-error-re) "Error:")
+             (regexp " \\([^:]+\\):\\([0-9]+\\):")))
+     1 2)
     ;; `lua-traceback-line-re'
     ("^\\(?:[\t ]*\\|.*>[\t ]+\\)\\(?:[^\n\t ]+:[0-9]+:[\t ]*\\)*\\(?:\\([^\n\t ]+\\):\\([0-9]+\\):\\)" 1 2)))
 
@@ -207,10 +215,11 @@ sending regions to the inferior process."
               (concat "\\`" inf-lua--prompt-internal) string))
     ;; Stop prompts from stacking up when sending regions: > > >
     (setq string (concat "\n" string)))
+  ;; Replace useless error locations
   (replace-regexp-in-string
-   ;; Useless error prefixes in rep.lua
-   "^\\(\\[string \"REPL\"\\]:[0-9]+: \\)" "Error: "
-   string))
+   (concat "^" inf-lua--internal-error-re) "Error:"
+   (replace-regexp-in-string
+    (concat "\\(\\s-+\\)" inf-lua--internal-error-re) "\\1[REPL]:" string)))
 
 
 ;;; TODO(5/21/24): send string function to convert strings to literals
@@ -234,10 +243,10 @@ sending regions to the inferior process."
 
 ;;; Font-locking
 (defvar inf-lua-font-lock-keywords
-  `(;; Tracebacks (rep.lua)
+  `(;; Tracebacks (Lua and rep.lua)
     (,(rx-to-string `(seq bol (group "Error") ": " (group (* nonl))))
-     (1 'font-lock-warning-face prepend)
-     (2 '(:inherit font-lock-warning-face :slant italic :weight normal) prepend))
+     (1 'font-lock-warning-face append)
+     (2 '(:inherit font-lock-warning-face :slant italic :weight normal) append))
     (,(rx-to-string `(seq ": " (group  "in function ") "'" (group (+ (not "'"))) "'"))
      (1 'font-lock-comment-face)
      (2 'font-lock-function-name-face prepend))
@@ -247,7 +256,7 @@ sending regions to the inferior process."
      (2 'font-lock-doc-markup-face)
      (3 'font-lock-comment-face))
     (,(rx-to-string `(seq bol "stack traceback")) . font-lock-preprocessor-face)
-    ("\\[C\\]" . font-lock-constant-face)
+    ("\\[\\(?:C\\|REPL\\)\\]" . font-lock-constant-face)
     ("\\[string \"REPL\"\\]:.*" . font-lock-comment-face))
   "Additional font-locking keywords in `inf-lua-mode'.")
 
