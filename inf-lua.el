@@ -5,7 +5,7 @@
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Created:  9 December 2023
-;; Keywords: lua, languages
+;; Keywords: lua repl languages
 
 ;; This file is not part of GNU Emacs.
 ;;
