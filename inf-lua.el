@@ -87,6 +87,12 @@
   :type '(choice (const :tag "None" nil) file)
   :safe 'string-or-null-p)
 
+(defcustom inf-lua-history-continued-sep " "
+  "A string to join continued inputs in history.
+When nil, continued lines aren't joined in the repl history."
+  :type '(choice (const :tag "None" nil) string)
+  :safe 'string-or-null-p)
+
 (defcustom inf-lua-startfile nil
   "File to load into the inferior Lua process at startup."
   :type '(choice (const :tag "None" nil) (file :must-match t)))
@@ -221,6 +227,28 @@ sending regions to the inferior process."
    (replace-regexp-in-string
     (concat "\\(\\s-+\\)" inf-lua--internal-error-re) "\\1[REPL]:" string)))
 
+;;; Input filter
+
+(defun inf-lua--statement-continuation-p ()
+  "Return non-nil if prompt is `inf-lua-prompt-continue'."
+  (save-excursion
+    (or (eq (point) (comint-line-beginning-position))
+        (comint-previous-prompt 1))
+    (forward-line 0)
+    (looking-at-p inf-lua-prompt-continue)))
+
+(defun inf-lua--input-filter (string)
+  "Filter STRING for `comint-input-filter'.
+When current prompt is a continued prompt, append STRING to last history
+element."
+  (when (comint-nonblank-p string)
+    (or (not inf-lua-history-continued-sep)
+        (not (inf-lua--statement-continuation-p))
+        (prog1 nil
+          (ring-insert comint-input-ring
+                       (concat (ring-remove comint-input-ring 0)
+                               inf-lua-history-continued-sep
+                               string))))))
 
 ;;; TODO(5/21/24): send string function to convert strings to literals
 ;; and load in Lua repl for source locations in errors (see `lua-send-region')
@@ -474,18 +502,13 @@ command, eg. move to beginning of \"t[i].fn().prefix\"."
               comint-prompt-read-only t
               comint-prompt-regexp inf-lua--prompt-internal
               comint-output-filter-functions '(ansi-color-process-output)
+              comint-input-filter #'inf-lua--input-filter
               comint-highlight-input nil)
   (add-hook 'comint-preoutput-filter-functions #'inf-lua--preoutput-filter nil t)
   (setq-local scroll-conservatively 1)
 
   ;; Font-locking
   (setq-local font-lock-defaults '(inf-lua-font-lock-keywords nil nil))
-  (when (and (null comint-use-prompt-regexp)
-             inf-lua-font-lock-enable
-             (or (require 'lua-ts-mode nil t)
-                 (require 'lua-mode nil t)))
-    (comint-fontify-input-mode))
-
   (setq comint-indirect-setup-function
         (lambda ()
           (let ((inhibit-message t)
@@ -493,6 +516,11 @@ command, eg. move to beginning of \"t[i].fn().prefix\"."
             (cond ((fboundp 'lua-ts-mode) (lua-ts-mode))
                   ((fboundp 'lua-mode) (lua-mode))
                   (t nil)))))
+  (when (and (null comint-use-prompt-regexp)
+             inf-lua-font-lock-enable
+             (or (require 'lua-ts-mode nil t)
+                 (require 'lua-mode nil t)))
+    (comint-fontify-input-mode))
 
   ;; Compilation
   (setq-local compilation-error-regexp-alist inf-lua-repl-compilation-regexp-alist)
