@@ -357,10 +357,11 @@ end
 (defun inf-lua-setup-completion ()
   "Setup completion in Lua repl."
   (interactive)
-  (if-let ((process (inf-lua-process)))
-      (progn (comint-send-string process (concat inf-lua--completion-code "\n"))
-             (setq inf-lua-completion-enabled t))
-    (user-error "Start a lua process first")))
+  (let ((process (inf-lua-process)))
+    (unless process
+      (user-error "Start a lua process first"))
+    (comint-send-string process (concat inf-lua--completion-code "\n"))
+    (setq inf-lua-completion-enabled t)))
 
 (defun inf-lua--get-completions-from-process (process input &optional scope)
   "Get completions for prefix INPUT in SCOPE from PROCESS."
